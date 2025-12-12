@@ -30,7 +30,7 @@ from .models import (
     DiffusionGenerator,
     AutoregressiveGraphGenerator,
 )
-from .models.types import GraphBatch
+from .models.types import GraphBatch, compute_edge_metrics
 
 
 def save_loss_plot(
@@ -39,19 +39,48 @@ def save_loss_plot(
     out_dir: str = "results",
     y_min: float = 0.0,
     y_max: float = 10.0,
+    metrics: dict = None,
 ):
-    """Save a loss plot with datetime label."""
+    """Save a loss plot with datetime label, optionally including edge metrics."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_path = pathlib.Path(out_dir) / f"loss_{model_name}_{timestamp}.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(range(len(losses)), losses, "b-", linewidth=2, marker="o", markersize=4)
-    ax.set_xlabel("Epoch", fontsize=12)
-    ax.set_ylabel("Loss", fontsize=12)
-    ax.set_title(f"Training Loss: {model_name} ({timestamp})", fontsize=14)
-    ax.set_ylim(y_min, y_max)
-    ax.grid(True, alpha=0.3)
+    # Determine layout based on whether we have metrics
+    if metrics and any(len(v) > 0 for v in metrics.values()):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    else:
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        ax2 = None
+
+    # Plot loss
+    ax1.plot(range(len(losses)), losses, "b-", linewidth=2, marker="o", markersize=4)
+    ax1.set_xlabel("Epoch", fontsize=12)
+    ax1.set_ylabel("Loss", fontsize=12)
+    ax1.set_title(f"Training Loss: {model_name}", fontsize=14)
+    ax1.set_ylim(y_min, y_max)
+    ax1.grid(True, alpha=0.3)
+
+    # Plot metrics if available
+    if ax2 is not None and metrics:
+        colors = {"precision": "green", "recall": "blue", "f1": "red"}
+        for name, values in metrics.items():
+            if len(values) > 0:
+                ax2.plot(
+                    range(len(values)),
+                    values,
+                    color=colors.get(name, "gray"),
+                    linewidth=2,
+                    marker="o",
+                    markersize=4,
+                    label=name.capitalize(),
+                )
+        ax2.set_xlabel("Epoch", fontsize=12)
+        ax2.set_ylabel("Score", fontsize=12)
+        ax2.set_title(f"Edge Metrics: {model_name}", fontsize=14)
+        ax2.set_ylim(0.0, 1.0)
+        ax2.legend(loc="lower right")
+        ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
@@ -230,8 +259,11 @@ def train_vae_gen(
     opt = torch.optim.Adam(params, lr=args.lr)
 
     epoch_losses = []
+    epoch_metrics = {"precision": [], "recall": [], "f1": []}
+
     for epoch in range(args.epochs):
         epoch_loss = 0.0
+        epoch_prec, epoch_rec, epoch_f1 = 0.0, 0.0, 0.0
         num_batches = 0
 
         for graphs in dataloader:
@@ -276,12 +308,32 @@ def train_vae_gen(
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
 
+            # Track metrics
+            with torch.no_grad():
+                metrics = compute_edge_metrics(
+                    outputs["edge_logits"], target_edges, mask
+                )
+                epoch_prec += metrics["precision"]
+                epoch_rec += metrics["recall"]
+                epoch_f1 += metrics["f1"]
+
             epoch_loss += loss.item()
             num_batches += 1
 
         avg_loss = epoch_loss / max(num_batches, 1)
+        avg_prec = epoch_prec / max(num_batches, 1)
+        avg_rec = epoch_rec / max(num_batches, 1)
+        avg_f1 = epoch_f1 / max(num_batches, 1)
+
         epoch_losses.append(avg_loss)
-        print(f"[vae_gen] epoch {epoch} loss={avg_loss:.4f}")
+        epoch_metrics["precision"].append(avg_prec)
+        epoch_metrics["recall"].append(avg_rec)
+        epoch_metrics["f1"].append(avg_f1)
+
+        print(
+            f"[vae_gen] epoch {epoch} loss={avg_loss:.4f} "
+            f"prec={avg_prec:.3f} rec={avg_rec:.3f} f1={avg_f1:.3f}"
+        )
 
     _save_encoder_generator(
         encoder,
@@ -293,6 +345,7 @@ def train_vae_gen(
         vocab=dataloader.dataset.vocab,
         test_indices=test_indices,
         losses=epoch_losses,
+        metrics=epoch_metrics,
     )
 
 
@@ -323,8 +376,11 @@ def train_diff_gen(
     opt = torch.optim.Adam(params, lr=args.lr)
 
     epoch_losses = []
+    epoch_metrics = {"precision": [], "recall": [], "f1": []}
+
     for epoch in range(args.epochs):
         epoch_loss = 0.0
+        epoch_prec, epoch_rec, epoch_f1 = 0.0, 0.0, 0.0
         num_batches = 0
 
         for graphs in dataloader:
@@ -366,12 +422,32 @@ def train_diff_gen(
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
 
+            # Track metrics
+            with torch.no_grad():
+                metrics = compute_edge_metrics(
+                    outputs["edge_logits"], target_edges, mask
+                )
+                epoch_prec += metrics["precision"]
+                epoch_rec += metrics["recall"]
+                epoch_f1 += metrics["f1"]
+
             epoch_loss += loss.item()
             num_batches += 1
 
         avg_loss = epoch_loss / max(num_batches, 1)
+        avg_prec = epoch_prec / max(num_batches, 1)
+        avg_rec = epoch_rec / max(num_batches, 1)
+        avg_f1 = epoch_f1 / max(num_batches, 1)
+
         epoch_losses.append(avg_loss)
-        print(f"[diff_gen] epoch {epoch} loss={avg_loss:.4f}")
+        epoch_metrics["precision"].append(avg_prec)
+        epoch_metrics["recall"].append(avg_rec)
+        epoch_metrics["f1"].append(avg_f1)
+
+        print(
+            f"[diff_gen] epoch {epoch} loss={avg_loss:.4f} "
+            f"prec={avg_prec:.3f} rec={avg_rec:.3f} f1={avg_f1:.3f}"
+        )
 
     _save_encoder_generator(
         encoder,
@@ -383,6 +459,7 @@ def train_diff_gen(
         vocab=dataloader.dataset.vocab,
         test_indices=test_indices,
         losses=epoch_losses,
+        metrics=epoch_metrics,
     )
 
 
@@ -396,6 +473,7 @@ def _save_encoder_generator(
     vocab=None,
     test_indices=None,
     losses=None,
+    metrics=None,
 ):
     """Save encoder + generator checkpoint and loss plot."""
     checkpoint = {
@@ -413,13 +491,15 @@ def _save_encoder_generator(
         checkpoint["test_indices"] = test_indices
     if losses is not None:
         checkpoint["losses"] = losses
+    if metrics is not None:
+        checkpoint["metrics"] = metrics
     torch.save(checkpoint, args.out)
     print(f"Saved encoder + {type(generator).__name__} to {args.out}")
 
     # Save loss plot
     if losses is not None:
         model_name = type(generator).__name__
-        save_loss_plot(losses, model_name, out_dir="results")
+        save_loss_plot(losses, model_name, out_dir="results", metrics=metrics)
 
 
 def train_autoreg(
@@ -456,8 +536,11 @@ def train_autoreg(
     opt = torch.optim.Adam(params, lr=args.lr)
 
     epoch_losses = []
+    epoch_metrics = {"precision": [], "recall": [], "f1": []}
+
     for epoch in range(args.epochs):
         epoch_loss = 0.0
+        epoch_prec, epoch_rec, epoch_f1 = 0.0, 0.0, 0.0
         num_batches = 0
 
         for graphs in dataloader:
@@ -504,12 +587,32 @@ def train_autoreg(
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
 
+            # Track metrics
+            with torch.no_grad():
+                metrics = compute_edge_metrics(
+                    outputs["edge_logits"], target_edges, mask
+                )
+                epoch_prec += metrics["precision"]
+                epoch_rec += metrics["recall"]
+                epoch_f1 += metrics["f1"]
+
             epoch_loss += loss.item()
             num_batches += 1
 
         avg_loss = epoch_loss / max(num_batches, 1)
+        avg_prec = epoch_prec / max(num_batches, 1)
+        avg_rec = epoch_rec / max(num_batches, 1)
+        avg_f1 = epoch_f1 / max(num_batches, 1)
+
         epoch_losses.append(avg_loss)
-        print(f"[autoreg] epoch {epoch} loss={avg_loss:.4f}")
+        epoch_metrics["precision"].append(avg_prec)
+        epoch_metrics["recall"].append(avg_rec)
+        epoch_metrics["f1"].append(avg_f1)
+
+        print(
+            f"[autoreg] epoch {epoch} loss={avg_loss:.4f} "
+            f"prec={avg_prec:.3f} rec={avg_rec:.3f} f1={avg_f1:.3f}"
+        )
 
     _save_encoder_generator(
         encoder,
@@ -521,6 +624,7 @@ def train_autoreg(
         vocab=dataloader.dataset.vocab,
         test_indices=test_indices,
         losses=epoch_losses,
+        metrics=epoch_metrics,
     )
 
 

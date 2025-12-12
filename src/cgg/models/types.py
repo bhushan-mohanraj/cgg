@@ -102,3 +102,49 @@ def compute_edge_loss(
         per_edge_loss = per_edge_loss * penalty_weight
 
     return per_edge_loss.mean()
+
+
+def compute_edge_metrics(
+    edge_logits: torch.Tensor,
+    edge_targets: torch.Tensor,
+    mask: torch.Tensor,
+    threshold: float = 0.5,
+) -> dict[str, float]:
+    """
+    Compute precision, recall, and F1 for edge prediction.
+
+    Args:
+        edge_logits: (batch, nodes, nodes) predicted edge logits
+        edge_targets: (batch, nodes, nodes) ground-truth binary adjacency
+        mask: (batch, nodes) boolean mask indicating valid nodes
+        threshold: probability threshold for predicting an edge
+
+    Returns:
+        Dictionary with 'precision', 'recall', 'f1' (all in [0, 1])
+    """
+    mask = mask.bool()
+    edge_mask = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+
+    if not edge_mask.any():
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+    # Get predictions and targets for valid edges only
+    pred_probs = torch.sigmoid(edge_logits[edge_mask])
+    pred_edges = (pred_probs > threshold).float()
+    true_edges = edge_targets[edge_mask].float()
+
+    # True positives, false positives, false negatives
+    tp = (pred_edges * true_edges).sum().item()
+    fp = (pred_edges * (1 - true_edges)).sum().item()
+    fn = ((1 - pred_edges) * true_edges).sum().item()
+
+    # Compute metrics
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
+
+    return {"precision": precision, "recall": recall, "f1": f1}
