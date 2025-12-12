@@ -1,13 +1,22 @@
-"""Decode a single sample from a ConstrainedGraphVAE embedding and save a visualization.
+"""Decode a single sample and save visualizations of both predicted and original graphs.
 
 Usage: python -m cgg.decode_sample --ckpt PATH --sample 0 --out out.png
 If no checkpoint is provided, an untrained model will be used.
+
+What this script does:
+1. Loads the dataset of code graphs (parsed from Python AST)
+2. Picks the graph at index `--sample` (e.g., sample 5 = the 6th function in the dataset)
+3. Converts that graph to a batched tensor representation (GraphBatch)
+4. Runs the specified model to predict node labels and edges from the input
+5. Saves TWO images:
+   - The predicted graph (from model output) -> {out}
+   - The original ground-truth graph -> {out_dir}/{sample}-original.png
 """
+
 from __future__ import annotations
 
 import argparse
 import pathlib
-import sys
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -23,12 +32,42 @@ from .graph_utils import single_logits_to_nx
 import torch.nn.functional as F
 
 
+def draw_graph(g: nx.Graph, title: str, out_path: str):
+    """Draw a NetworkX graph and save to file."""
+    plt.figure(figsize=(8, 8))
+    pos = nx.spring_layout(g, seed=42)
+    labels = {
+        n: data.get("token") or data.get("label", str(n))
+        for n, data in g.nodes(data=True)
+    }
+    nx.draw(g, pos=pos, labels=labels, with_labels=True, node_size=300, font_size=8)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved: {out_path}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", help="model checkpoint path", default=None)
-    p.add_argument("--model", choices=["vae", "hier", "diff"], default="diff", help="which model to decode with")
-    p.add_argument("--denoise", action="store_true", help="run iterative denoising sampling (diffusion only)")
-    p.add_argument("--denoise-steps", type=int, default=50, help="number of denoising steps to run when --denoise is set")
+    p.add_argument(
+        "--model",
+        choices=["vae", "hier", "diff"],
+        default="diff",
+        help="which model to decode with",
+    )
+    p.add_argument(
+        "--denoise",
+        action="store_true",
+        help="run iterative denoising sampling (diffusion only)",
+    )
+    p.add_argument(
+        "--denoise-steps",
+        type=int,
+        default=50,
+        help="number of denoising steps to run when --denoise is set",
+    )
     p.add_argument("--sample", type=int, default=0)
     p.add_argument("--out", default="decoded.png")
     p.add_argument("--max-nodes", type=int, default=64)
@@ -48,14 +87,18 @@ def main(argv=None):
     graph = dataset.graphs[sample_idx]
 
     # create a GraphBatch for a single graph
-    batch = cgg_data.graphs_to_batch([graph], vocab=dataset.vocab, max_nodes=args.max_nodes)
+    batch = cgg_data.graphs_to_batch(
+        [graph], vocab=dataset.vocab, max_nodes=args.max_nodes
+    )
     batch = batch.to(device)
 
     node_logits = None
     edge_logits = None
 
     if args.model == "vae":
-        vae = ConstrainedGraphVAE(input_dim=len(dataset.vocab), hidden_dim=128, latent_dim=64).to(device)
+        vae = ConstrainedGraphVAE(
+            input_dim=len(dataset.vocab), hidden_dim=128, latent_dim=64
+        ).to(device)
         if args.ckpt:
             sd = torch.load(args.ckpt, map_location=device)
             vae.load_state_dict(sd)
@@ -67,7 +110,9 @@ def main(argv=None):
 
     elif args.model == "hier":
         hier = HierarchicalAutoregressiveModel(
-            input_dim=len(dataset.vocab), hidden_dim=128, num_node_tokens=len(dataset.vocab)
+            input_dim=len(dataset.vocab),
+            hidden_dim=128,
+            num_node_tokens=len(dataset.vocab),
         ).to(device)
         if args.ckpt:
             sd = torch.load(args.ckpt, map_location=device)
@@ -75,9 +120,7 @@ def main(argv=None):
 
         hier.eval()
         with torch.no_grad():
-            segment_logits, node_logits = hier(batch)
-            # hierarchical model does not predict edges; reuse input adjacency
-            edge_logits = batch.adjacency
+            segment_logits, node_logits, edge_logits = hier(batch)
 
     elif args.model == "diff":
         # If a checkpoint is provided, inspect it to determine the original num_steps
@@ -100,7 +143,10 @@ def main(argv=None):
             num_steps = 1000
 
         diff = DiscreteDiffusionModel(
-            input_dim=len(dataset.vocab), num_node_tokens=len(dataset.vocab), num_steps=num_steps, hidden_dim=128
+            input_dim=len(dataset.vocab),
+            num_node_tokens=len(dataset.vocab),
+            num_steps=num_steps,
+            hidden_dim=128,
         ).to(device)
         if sd is not None:
             diff.load_state_dict(sd)
@@ -116,14 +162,26 @@ def main(argv=None):
             timesteps = list(range(num_steps - 1, -1, -step))
 
             # initialize with pure noise tokens
-            x = torch.randint(0, diff.num_node_tokens, (B, batch.node_features.shape[1]), device=device)
+            x = torch.randint(
+                0,
+                diff.num_node_tokens,
+                (B, batch.node_features.shape[1]),
+                device=device,
+            )
 
             for t_val in timesteps:
                 # build a batch with current tokens encoded as one-hot
-                one_hot = F.one_hot(x, num_classes=diff.num_node_tokens).to(dtype=batch.node_features.dtype)
-                cur_batch = GraphBatch(node_features=one_hot, adjacency=batch.adjacency, mask=batch.mask)
+                one_hot = F.one_hot(x, num_classes=diff.num_node_tokens).to(
+                    dtype=batch.node_features.dtype
+                )
+                cur_batch = GraphBatch(
+                    node_features=one_hot, adjacency=batch.adjacency, mask=batch.mask
+                )
                 with torch.no_grad():
-                    out = diff(cur_batch, torch.full((B,), t_val, dtype=torch.long, device=device))
+                    out = diff(
+                        cur_batch,
+                        torch.full((B,), t_val, dtype=torch.long, device=device),
+                    )
                 logits = out["node_logits"] if isinstance(out, dict) else out[0]
                 # greedy update
                 x = logits.argmax(dim=-1)
@@ -133,25 +191,100 @@ def main(argv=None):
             edge_logits = out.get("edge_logits") if isinstance(out, dict) else None
         else:
             # single-step prediction at t=0 (model predicts clean tokens from near-clean input)
-            t0 = torch.zeros((batch.node_features.shape[0],), dtype=torch.long, device=device)
+            t0 = torch.zeros(
+                (batch.node_features.shape[0],), dtype=torch.long, device=device
+            )
             with torch.no_grad():
                 out = diff(batch, t0)
             node_logits = out["node_logits"]
             edge_logits = out["edge_logits"]
 
     # Convert to NetworkX and draw
-    # include all predicted edges (don't threshold at 0.5)
+    # Diagnostic prints: inspect edge logits / probabilities and ground-truth adjacency
+    if edge_logits is None:
+        print("Warning: model did not return edge_logits; no edges will be visualized.")
+        # create a placeholder of very negative logits
+        edge_logits = torch.full(
+            (
+                batch.node_features.shape[0],
+                batch.node_features.shape[1],
+                batch.node_features.shape[1],
+            ),
+            float("-inf"),
+            device=node_logits.device,
+        )
+
+    # compute simple stats for the first sample
+    el = edge_logits[0].cpu()
+    probs = torch.sigmoid(el)
+    mask0 = batch.mask[0].cpu().bool()
+    valid_idxs = mask0.nonzero(as_tuple=False).squeeze(-1)
+    if valid_idxs.numel() == 0:
+        print("No valid nodes in mask for sample; nothing to show.")
+    else:
+        # restrict to valid node pairs for statistics
+        sub_probs = probs[valid_idxs][:, valid_idxs]
+        sub_logits = el[valid_idxs][:, valid_idxs]
+        flat_logits = sub_logits.flatten()
+        flat_probs = sub_probs.flatten()
+        print(
+            f"Edge logits: min={float(flat_logits.min()):.4f}, max={float(flat_logits.max()):.4f}, mean={float(flat_logits.mean()):.4f}"
+        )
+        print(
+            f"Edge probs:  min={float(flat_probs.min()):.4f}, max={float(flat_probs.max()):.4f}, mean={float(flat_probs.mean()):.4f}"
+        )
+        n_pos = (flat_probs > 0.5).sum().item()
+        tot = flat_probs.numel()
+        print(
+            f"Edges with prob>0.5: {n_pos}/{tot} ({100.0 * n_pos / max(1, tot):.2f}%)"
+        )
+
+        # show a few highest-probability edges
+        topk = min(10, tot)
+        vals, idxs = torch.topk(flat_probs, topk)
+        edges_list = []
+        N = sub_probs.shape[0]
+        for v, idx in zip(vals.tolist(), idxs.tolist()):
+            i = idx // N
+            j = idx % N
+            edges_list.append(
+                (int(valid_idxs[i].item()), int(valid_idxs[j].item()), float(v))
+            )
+        print("Top edges (i, j, prob):", edges_list)
+
+        # compare to ground-truth adjacency
+        gt = batch.adjacency[0].cpu()
+        gt_sub = gt[valid_idxs][:, valid_idxs]
+        gt_count = int(gt_sub.sum().item())
+        print(f"Ground-truth edges (masked): {gt_count}/{tot}")
+
+    # threshold predicted edges at 0.5 (default behavior)
     g_pred = single_logits_to_nx(
-        node_logits[0].cpu(), edge_logits[0].cpu(), vocab=dataset.vocab, mask=batch.mask[0].cpu(), edge_thresh=0.0
+        node_logits[0].cpu(),
+        edge_logits[0].cpu(),
+        vocab=dataset.vocab,
+        mask=batch.mask[0].cpu(),
+        edge_thresh=0.5,
     )
 
-    plt.figure(figsize=(6, 6))
-    pos = nx.spring_layout(g_pred)
-    labels = {n: data.get("token", data.get("label")) for n, data in g_pred.nodes(data=True)}
-    nx.draw(g_pred, pos=pos, labels=labels, with_labels=True, node_size=200)
-    plt.title(f"Decoded graph from sample {sample_idx}")
-    plt.savefig(args.out)
-    print(f"Saved decoded graph to {args.out}")
+    # Ensure output directory exists
+    out_path = pathlib.Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Draw and save predicted graph
+    draw_graph(
+        g_pred,
+        f"Predicted graph (sample {sample_idx}, model={args.model})",
+        str(out_path),
+    )
+
+    # Also save the original ground-truth graph
+    # The original graph is stored in dataset.graphs[sample_idx]
+    original_graph = dataset.graphs[sample_idx]
+    original_out = out_path.parent / f"{sample_idx}-original.png"
+    draw_graph(
+        original_graph, f"Original graph (sample {sample_idx})", str(original_out)
+    )
 
 
 if __name__ == "__main__":

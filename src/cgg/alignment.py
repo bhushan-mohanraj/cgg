@@ -18,9 +18,9 @@ import torch.nn as nn
 try:
     from openai import OpenAI
 except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "openai package is required. Install with `uv add openai`."
-        ) from exc
+    raise ImportError(
+        "openai package is required. Install with `uv add openai`."
+    ) from exc
 
 
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
@@ -102,5 +102,6 @@ def embed_and_align(
             device
         )
         aligned = adapter(emb)
-        return {k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in aligned.items()}
-
+        return {
+            k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in aligned.items()
+        }

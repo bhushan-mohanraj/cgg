@@ -6,7 +6,7 @@ and convert those functions to code graphs analagous to ASTs.
 
 import ast
 import pathlib
-from typing import Iterable, List, Dict, Optional, Tuple
+from typing import Iterable, List, Dict, Optional
 
 import networkx as nx
 import torch
@@ -17,8 +17,14 @@ DATA_PATH = pathlib.Path("data")
 COLLECTIONS = [
     "boolean_algebra",
     "divide_and_conquer",
-    "sorts",
+    "dynamic_programming",
+    "greedy_methods",
+    "linear_algebra",
+    "maths",
     "physics",
+    "searches",
+    "sorts",
+    "strings",
 ]
 
 
@@ -100,7 +106,6 @@ def functiondef_to_nx(func: ast.FunctionDef) -> nx.DiGraph:
         return nid
 
     # Walk the AST and add nodes in a parent-first order
-    parents: List[Tuple[int, ast.AST]] = []
 
     def visit(node, parent_id: Optional[int] = None):
         my_id = add_node(node)
@@ -114,7 +119,9 @@ def functiondef_to_nx(func: ast.FunctionDef) -> nx.DiGraph:
     return g
 
 
-def build_vocab_from_functions(funcs: Iterable[ast.FunctionDef], min_count: int = 1) -> Dict[str, int]:
+def build_vocab_from_functions(
+    funcs: Iterable[ast.FunctionDef], min_count: int = 1
+) -> Dict[str, int]:
     """Build a simple token vocabulary from a list of FunctionDef ASTs.
 
     Tokens are the `token` attribute attached to AST nodes (names, constants, attrs),
@@ -139,7 +146,9 @@ def build_vocab_from_functions(funcs: Iterable[ast.FunctionDef], min_count: int 
     return vocab
 
 
-def graphs_to_batch(graphs: List[nx.DiGraph], vocab: Dict[str, int], max_nodes: Optional[int] = None) -> GraphBatch:
+def graphs_to_batch(
+    graphs: List[nx.DiGraph], vocab: Dict[str, int], max_nodes: Optional[int] = None
+) -> GraphBatch:
     """Convert a list of NetworkX graphs into a batched `GraphBatch`.
 
     - node_features: one-hot token vectors (batch, nodes, vocab_size)
@@ -162,7 +171,9 @@ def graphs_to_batch(graphs: List[nx.DiGraph], vocab: Dict[str, int], max_nodes: 
             node_features = torch.cat([g.node_features for g in graphs], dim=0)
             adjacency = torch.cat([g.adjacency for g in graphs], dim=0)
             mask = torch.cat([g.mask for g in graphs], dim=0)
-            return GraphBatch(node_features=node_features, adjacency=adjacency, mask=mask)
+            return GraphBatch(
+                node_features=node_features, adjacency=adjacency, mask=mask
+            )
         except Exception:
             # Fall back to normal path if concatenation fails for unexpected shapes
             pass
@@ -172,8 +183,12 @@ def graphs_to_batch(graphs: List[nx.DiGraph], vocab: Dict[str, int], max_nodes: 
     sizes = [g.number_of_nodes() for g in graphs]
     target_nodes = max(sizes) if max_nodes is None else min(max(sizes), max_nodes)
 
-    node_features = torch.zeros((batch_size, target_nodes, vocab_size), dtype=torch.float32)
-    adjacency = torch.zeros((batch_size, target_nodes, target_nodes), dtype=torch.float32)
+    node_features = torch.zeros(
+        (batch_size, target_nodes, vocab_size), dtype=torch.float32
+    )
+    adjacency = torch.zeros(
+        (batch_size, target_nodes, target_nodes), dtype=torch.float32
+    )
     mask = torch.zeros((batch_size, target_nodes), dtype=torch.bool)
 
     for i, g in enumerate(graphs):

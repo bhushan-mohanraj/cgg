@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .types import GraphBatch
+from .types import GraphBatch, compute_edge_loss
 
 
 class DiffusionBackbone(nn.Module):
@@ -16,8 +16,6 @@ class DiffusionBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: expected (batch, nodes, dim)
-        if x.dim() != 3:
-            print(f"DiffusionBackbone.forward received tensor with shape {tuple(x.shape)} (dim={x.dim()})")
         assert x.dim() == 3, f"DiffusionBackbone expected 3D tensor, got {x.dim()}-D"
         out = self.encoder(x)
         return out
@@ -60,10 +58,12 @@ class DiscreteDiffusionModel(nn.Module):
         """
         Add discrete noise by random replacement.
         """
-        noise = torch.randint(0, self.num_node_tokens, x_start.shape, device=x_start.device)
+        noise = torch.randint(
+            0, self.num_node_tokens, x_start.shape, device=x_start.device
+        )
         # Ensure keep_mask has the same (batch, nodes) shape as x_start to avoid
         # adding extra singleton dimensions during broadcasting. `t` is (batch,).
-        bsize = x_start.shape[0]
+        x_start.shape[0]
         n_nodes = x_start.shape[1]
         keep_prob = self.alphas_cumprod[t].view(-1, 1)  # (batch, 1)
         # Expand to per-node probabilities and sample a mask of shape (batch, nodes)
@@ -75,23 +75,16 @@ class DiscreteDiffusionModel(nn.Module):
         Predict clean nodes/edges from noisy observations at timestep t.
         t: (batch,) timestep indices
         """
-        # Debug: inspect incoming batch.node_features shape and dtype
-        try:
-            print(f"DiscreteDiffusionModel.forward: batch.node_features.shape={tuple(batch.node_features.shape)} dtype={batch.node_features.dtype}")
-        except Exception:
-            print(f"DiscreteDiffusionModel.forward: could not inspect batch.node_features")
-
         node_tokens = batch.node_features.argmax(dim=-1)  # assume one-hot inputs
         x_noisy = self.q_sample(node_tokens, t)
 
         time_emb = self.time_embed(t).unsqueeze(1)  # (batch, 1, dim)
         node_emb = self.node_embed(x_noisy) + time_emb
-        # Debug: ensure node_emb shape is as expected
-        if node_emb.dim() != 3:
-            print(f"DiscreteDiffusionModel.forward: node_emb shape={tuple(node_emb.shape)}")
         node_ctx = self.backbone(node_emb)
         node_logits = self.node_head(node_ctx)
-        node_logits = node_logits.masked_fill(~batch.mask.unsqueeze(-1).bool(), float("-inf"))
+        node_logits = node_logits.masked_fill(
+            ~batch.mask.unsqueeze(-1).bool(), float("-inf")
+        )
 
         # Edge prediction conditioned on node context
         node_pair = node_ctx.unsqueeze(2) + node_ctx.unsqueeze(1)
@@ -101,11 +94,13 @@ class DiscreteDiffusionModel(nn.Module):
             float("-inf"),
         )
 
-        return {"node_logits": node_logits, "edge_logits": edge_logits, "x_noisy": x_noisy}
+        return {
+            "node_logits": node_logits,
+            "edge_logits": edge_logits,
+            "x_noisy": x_noisy,
+        }
 
-    def p_losses(
-        self, batch: GraphBatch, t: torch.Tensor
-    ) -> dict[str, torch.Tensor]:
+    def p_losses(self, batch: GraphBatch, t: torch.Tensor) -> dict[str, torch.Tensor]:
         outputs = self.forward(batch, t)
         target_tokens = batch.node_features.argmax(dim=-1)
         node_loss = F.cross_entropy(
@@ -114,10 +109,13 @@ class DiscreteDiffusionModel(nn.Module):
             reduction="mean",
         )
 
-        edge_targets = batch.adjacency
-        edge_mask = batch.mask.unsqueeze(-1) & batch.mask.unsqueeze(-2)
-        edge_loss = F.binary_cross_entropy_with_logits(
-            outputs["edge_logits"][edge_mask], edge_targets[edge_mask], reduction="mean"
+        # Use shared edge loss computation
+        edge_loss = compute_edge_loss(
+            outputs["edge_logits"], batch.adjacency, batch.mask
         )
 
-        return {"loss": node_loss + edge_loss, "node_loss": node_loss, "edge_loss": edge_loss}
+        return {
+            "loss": node_loss + edge_loss,
+            "node_loss": node_loss,
+            "edge_loss": edge_loss,
+        }

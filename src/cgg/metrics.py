@@ -11,7 +11,7 @@ Metrics:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Hashable, Iterable, Tuple
+from typing import Dict, Hashable, Tuple
 
 import networkx as nx
 from zss import Node, simple_distance
@@ -75,7 +75,9 @@ def edge_prf(
     tp = len(ref_edges & gen_edges)
     precision = tp / len(gen_edges) if gen_edges else 0.0
     recall = tp / len(ref_edges) if ref_edges else 0.0
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    f1 = (
+        (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    )
     return precision, recall, f1
 
 
@@ -83,7 +85,9 @@ def _to_zss_tree(graph: nx.DiGraph, node_label_attr: str) -> Node:
     # Identify root: node with in-degree 0
     roots = [n for n, deg in graph.in_degree() if deg == 0]
     if len(roots) != 1:
-        raise ValueError("Graph must be a rooted tree (exactly one node with in-degree 0).")
+        raise ValueError(
+            "Graph must be a rooted tree (exactly one node with in-degree 0)."
+        )
     root = roots[0]
 
     def build(node: Hashable) -> Node:
@@ -118,7 +122,9 @@ def evaluate_graphs(
 ) -> GraphEvalResult:
     correctness = 1.0 if code_correct else 0.0 if code_correct is not None else 0.0
 
-    node_acc = node_label_accuracy(reference, generated, node_label_attr=node_label_attr)
+    node_acc = node_label_accuracy(
+        reference, generated, node_label_attr=node_label_attr
+    )
     edge_p, edge_r, edge_f1 = edge_prf(reference, generated)
 
     ted: float | None = None
@@ -139,4 +145,3 @@ def evaluate_graphs(
         edge_f1=edge_f1,
         tree_edit_distance=ted,
     )
-

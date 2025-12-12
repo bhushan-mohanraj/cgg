@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .types import GraphBatch
+from .types import GraphBatch, compute_edge_loss
 
 # Require PyG for GCN layers
 try:
@@ -57,9 +57,9 @@ class ConstrainedGraphVAE(nn.Module):
 
         # Convert batched dense adjacency to a single flattened edge_index
         # and flatten node features to (B*N, feat) so we can run PyG convs.
-        B, N, F = x.shape
+        B, N, feat_dim = x.shape
         device = x.device
-        x_flat = x.reshape(B * N, F)
+        x_flat = x.reshape(B * N, feat_dim)
 
         edge_idx_list = []
         for b in range(B):
@@ -85,8 +85,12 @@ class ConstrainedGraphVAE(nn.Module):
         pooled = h.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1.0)
         return self.enc_mean(pooled), self.enc_logvar(pooled)
 
-    def _dense_gcn(self, linear: nn.Linear, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        raise RuntimeError("_dense_gcn removed; ConstrainedGraphVAE now requires torch_geometric GCNConv")
+    def _dense_gcn(
+        self, linear: nn.Linear, x: torch.Tensor, adj: torch.Tensor
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            "_dense_gcn removed; ConstrainedGraphVAE now requires torch_geometric GCNConv"
+        )
 
     def reparameterize(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         # Clamp logvar to avoid numerical overflow in exp()
@@ -101,8 +105,8 @@ class ConstrainedGraphVAE(nn.Module):
         num_nodes = batch.mask.shape[1]
 
         # Node reconstruction
-        node_logits = self.dec_node(z).unsqueeze(1).expand(
-            -1, num_nodes, -1
+        node_logits = (
+            self.dec_node(z).unsqueeze(1).expand(-1, num_nodes, -1)
         )  # (batch, nodes, input_dim)
 
         # Edge reconstruction with degree masking
@@ -135,18 +139,14 @@ class ConstrainedGraphVAE(nn.Module):
 
         node_mask = batch.mask.bool()
         if node_mask.any():
-            node_loss = F.mse_loss(node_logits[node_mask], batch.node_features[node_mask])
+            node_loss = F.mse_loss(
+                node_logits[node_mask], batch.node_features[node_mask]
+            )
         else:
             node_loss = torch.tensor(0.0, device=device)
 
-        edge_targets = batch.adjacency
-        edge_mask = batch.mask.unsqueeze(-1).bool() & batch.mask.unsqueeze(-2).bool()
-        if edge_mask.any():
-            edge_loss = F.binary_cross_entropy_with_logits(
-                edge_logits[edge_mask], edge_targets[edge_mask], reduction="mean"
-            )
-        else:
-            edge_loss = torch.tensor(0.0, device=device)
+        # Use shared edge loss computation
+        edge_loss = compute_edge_loss(edge_logits, batch.adjacency, batch.mask)
 
         # Prevent numerical overflow from exp(logvar) by clamping logvar
         safe_logvar = torch.clamp(logvar, max=20.0)

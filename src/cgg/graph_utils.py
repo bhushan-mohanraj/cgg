@@ -4,6 +4,7 @@ for visualization and comparison.
 Functions
 - batch_logits_to_nx: convert batched predictions into a list of networkx.DiGraph
 """
+
 from __future__ import annotations
 
 from typing import List, Dict
@@ -20,7 +21,13 @@ def _build_inverse_vocab(vocab: Dict[str, int]) -> Dict[int, str]:
     return inv
 
 
-def logits_to_nx(node_logits: torch.Tensor, edge_logits: torch.Tensor, vocab: Dict[str, int], mask: torch.Tensor | None = None, edge_thresh: float = 0.5) -> List[nx.DiGraph]:
+def logits_to_nx(
+    node_logits: torch.Tensor,
+    edge_logits: torch.Tensor,
+    vocab: Dict[str, int],
+    mask: torch.Tensor | None = None,
+    edge_thresh: float = 0.5,
+) -> List[nx.DiGraph]:
     """Convert batched node and edge logits to NetworkX graphs.
 
     Args:
@@ -74,7 +81,13 @@ def logits_to_nx(node_logits: torch.Tensor, edge_logits: torch.Tensor, vocab: Di
     return graphs
 
 
-def single_logits_to_nx(node_logits: torch.Tensor, edge_logits: torch.Tensor, vocab: Dict[str, int], mask: torch.Tensor | None = None, edge_thresh: float = 0.5) -> nx.DiGraph:
+def single_logits_to_nx(
+    node_logits: torch.Tensor,
+    edge_logits: torch.Tensor,
+    vocab: Dict[str, int],
+    mask: torch.Tensor | None = None,
+    edge_thresh: float = 0.5,
+) -> nx.DiGraph:
     """Convenience wrapper for single graph outputs (no batch dim)."""
     if node_logits.dim() == 2:
         node_logits = node_logits.unsqueeze(0)
@@ -82,4 +95,6 @@ def single_logits_to_nx(node_logits: torch.Tensor, edge_logits: torch.Tensor, vo
         edge_logits = edge_logits.unsqueeze(0)
     if mask is not None and mask.dim() == 1:
         mask = mask.unsqueeze(0)
-    return logits_to_nx(node_logits, edge_logits, vocab, mask=mask, edge_thresh=edge_thresh)[0]
+    return logits_to_nx(
+        node_logits, edge_logits, vocab, mask=mask, edge_thresh=edge_thresh
+    )[0]
