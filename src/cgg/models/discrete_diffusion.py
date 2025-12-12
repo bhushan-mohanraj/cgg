@@ -8,16 +8,19 @@ from .types import GraphBatch
 class DiffusionBackbone(nn.Module):
     def __init__(self, dim: int, n_layers: int = 2, n_heads: int = 4):
         super().__init__()
+        # Use batch_first=True so the encoder expects (batch, seq, dim)
         layer = nn.TransformerEncoderLayer(
-            d_model=dim, nhead=n_heads, dim_feedforward=dim * 2
+            d_model=dim, nhead=n_heads, dim_feedforward=dim * 2, batch_first=True
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=n_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, nodes, dim)
-        seq = x.transpose(0, 1)
-        out = self.encoder(seq)
-        return out.transpose(0, 1)
+        # x: expected (batch, nodes, dim)
+        if x.dim() != 3:
+            print(f"DiffusionBackbone.forward received tensor with shape {tuple(x.shape)} (dim={x.dim()})")
+        assert x.dim() == 3, f"DiffusionBackbone expected 3D tensor, got {x.dim()}-D"
+        out = self.encoder(x)
+        return out
 
 
 class DiscreteDiffusionModel(nn.Module):
@@ -57,11 +60,14 @@ class DiscreteDiffusionModel(nn.Module):
         """
         Add discrete noise by random replacement.
         """
-        noise = torch.randint(
-            0, self.num_node_tokens, x_start.shape, device=x_start.device
-        )
-        keep_prob = self.alphas_cumprod[t].view(-1, 1, 1)
-        keep_mask = torch.bernoulli(keep_prob).bool()
+        noise = torch.randint(0, self.num_node_tokens, x_start.shape, device=x_start.device)
+        # Ensure keep_mask has the same (batch, nodes) shape as x_start to avoid
+        # adding extra singleton dimensions during broadcasting. `t` is (batch,).
+        bsize = x_start.shape[0]
+        n_nodes = x_start.shape[1]
+        keep_prob = self.alphas_cumprod[t].view(-1, 1)  # (batch, 1)
+        # Expand to per-node probabilities and sample a mask of shape (batch, nodes)
+        keep_mask = torch.bernoulli(keep_prob.expand(-1, n_nodes)).bool()
         return torch.where(keep_mask, x_start, noise)
 
     def forward(self, batch: GraphBatch, t: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -69,11 +75,20 @@ class DiscreteDiffusionModel(nn.Module):
         Predict clean nodes/edges from noisy observations at timestep t.
         t: (batch,) timestep indices
         """
+        # Debug: inspect incoming batch.node_features shape and dtype
+        try:
+            print(f"DiscreteDiffusionModel.forward: batch.node_features.shape={tuple(batch.node_features.shape)} dtype={batch.node_features.dtype}")
+        except Exception:
+            print(f"DiscreteDiffusionModel.forward: could not inspect batch.node_features")
+
         node_tokens = batch.node_features.argmax(dim=-1)  # assume one-hot inputs
         x_noisy = self.q_sample(node_tokens, t)
 
         time_emb = self.time_embed(t).unsqueeze(1)  # (batch, 1, dim)
         node_emb = self.node_embed(x_noisy) + time_emb
+        # Debug: ensure node_emb shape is as expected
+        if node_emb.dim() != 3:
+            print(f"DiscreteDiffusionModel.forward: node_emb shape={tuple(node_emb.shape)}")
         node_ctx = self.backbone(node_emb)
         node_logits = self.node_head(node_ctx)
         node_logits = node_logits.masked_fill(~batch.mask.unsqueeze(-1).bool(), float("-inf"))
@@ -106,4 +121,3 @@ class DiscreteDiffusionModel(nn.Module):
         )
 
         return {"loss": node_loss + edge_loss, "node_loss": node_loss, "edge_loss": edge_loss}
-

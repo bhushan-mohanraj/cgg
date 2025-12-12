@@ -4,17 +4,14 @@ import torch.nn.functional as F
 
 from .types import GraphBatch
 
-
-class GCNLayer(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int):
-        super().__init__()
-        self.linear = nn.Linear(in_dim, out_dim)
-
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        # Simple GCN: A_hat X W
-        deg = adj.sum(dim=-1, keepdim=True).clamp(min=1.0)
-        norm_adj = adj / deg
-        return self.linear(norm_adj @ x)
+# Require PyG for GCN layers
+try:
+    from torch_geometric.nn import GCNConv  # type: ignore
+    from torch_geometric.utils import dense_to_sparse  # type: ignore
+except Exception as exc:  # pragma: no cover - runtime dependency
+    raise ImportError(
+        "torch_geometric is required. Install it: https://pytorch-geometric.readthedocs.io/"
+    ) from exc
 
 
 class ConstrainedGraphVAE(nn.Module):
@@ -36,8 +33,11 @@ class ConstrainedGraphVAE(nn.Module):
         super().__init__()
         self.max_degree = max_degree
 
-        self.enc1 = GCNLayer(input_dim, hidden_dim)
-        self.enc2 = GCNLayer(hidden_dim, hidden_dim)
+        # Use PyG GCNConv layers for encoding.
+        # Note: GCNConv expects node features shaped (num_nodes_total, in_channels)
+        # and an edge_index for the (possibly batched) graph.
+        self.conv1 = GCNConv(input_dim, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
         self.enc_mean = nn.Linear(hidden_dim, latent_dim)
         self.enc_logvar = nn.Linear(hidden_dim, latent_dim)
 
@@ -54,14 +54,44 @@ class ConstrainedGraphVAE(nn.Module):
 
     def encode(self, batch: GraphBatch) -> tuple[torch.Tensor, torch.Tensor]:
         x, adj, mask = batch.node_features, batch.adjacency, batch.mask
-        h = F.relu(self.enc1(x, adj))
-        h = F.relu(self.enc2(h, adj))
+
+        # Convert batched dense adjacency to a single flattened edge_index
+        # and flatten node features to (B*N, feat) so we can run PyG convs.
+        B, N, F = x.shape
+        device = x.device
+        x_flat = x.reshape(B * N, F)
+
+        edge_idx_list = []
+        for b in range(B):
+            dense = adj[b].to(device)
+            ei, _ = dense_to_sparse(dense)
+            if ei.numel() == 0:
+                continue
+            # offset indices by b*N
+            ei = ei + (b * N)
+            edge_idx_list.append(ei)
+
+        if len(edge_idx_list) == 0:
+            # no edges at all -> create empty edge_index
+            edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        else:
+            edge_index = torch.cat(edge_idx_list, dim=1).to(device)
+
+        out1 = F.relu(self.conv1(x_flat, edge_index))
+        out2 = F.relu(self.conv2(out1, edge_index))
+
+        h = out2.reshape(B, N, -1)
         h = h * mask.unsqueeze(-1)
         pooled = h.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1.0)
         return self.enc_mean(pooled), self.enc_logvar(pooled)
 
+    def _dense_gcn(self, linear: nn.Linear, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError("_dense_gcn removed; ConstrainedGraphVAE now requires torch_geometric GCNConv")
+
     def reparameterize(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * logvar)
+        # Clamp logvar to avoid numerical overflow in exp()
+        safe_logvar = torch.clamp(logvar, max=20.0)
+        std = torch.exp(0.5 * safe_logvar)
         eps = torch.randn_like(std)
         return mean + eps * std
 
@@ -100,19 +130,28 @@ class ConstrainedGraphVAE(nn.Module):
         mean: torch.Tensor,
         logvar: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        # Robust loss computation that avoids NaNs when masks are empty
+        device = node_logits.device
+
         node_mask = batch.mask.bool()
-        node_loss = F.mse_loss(
-            node_logits[node_mask], batch.node_features[node_mask]
-        )
+        if node_mask.any():
+            node_loss = F.mse_loss(node_logits[node_mask], batch.node_features[node_mask])
+        else:
+            node_loss = torch.tensor(0.0, device=device)
 
         edge_targets = batch.adjacency
-        edge_mask = (
-            batch.mask.unsqueeze(-1).bool() & batch.mask.unsqueeze(-2).bool()
-        )
-        edge_loss = F.binary_cross_entropy_with_logits(
-            edge_logits[edge_mask], edge_targets[edge_mask], reduction="mean"
-        )
-        kl = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+        edge_mask = batch.mask.unsqueeze(-1).bool() & batch.mask.unsqueeze(-2).bool()
+        if edge_mask.any():
+            edge_loss = F.binary_cross_entropy_with_logits(
+                edge_logits[edge_mask], edge_targets[edge_mask], reduction="mean"
+            )
+        else:
+            edge_loss = torch.tensor(0.0, device=device)
+
+        # Prevent numerical overflow from exp(logvar) by clamping logvar
+        safe_logvar = torch.clamp(logvar, max=20.0)
+        kl = -0.5 * torch.mean(1 + safe_logvar - mean.pow(2) - torch.exp(safe_logvar))
+
         total = node_loss + edge_loss + kl
         return {"loss": total, "node_loss": node_loss, "edge_loss": edge_loss, "kl": kl}
 
@@ -124,4 +163,3 @@ class ConstrainedGraphVAE(nn.Module):
         mask_i = allowed.unsqueeze(-1)
         mask_j = allowed.unsqueeze(-2)
         return mask_i & mask_j & batch.mask.unsqueeze(-1) & batch.mask.unsqueeze(-2)
-
